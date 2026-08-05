@@ -4,40 +4,76 @@ namespace App\Http\Controllers;
 
 use App\Services\OllamaPrompt;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Http;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class GenerateController extends Controller
 {
     public function __invoke(Request $request): StreamedResponse
     {
+        set_time_limit(0);
+        ini_set('max_execution_time', '0');
+
         $prompt = $request->input('prompt');
 
-        return response()->stream(function () use ($prompt) {
-            $response = Http::withOptions(['stream' => true])
-            ->post('http://127.0.0.1:11434/api/generate', [
-                'model' => 'qwen2.5-coder:7b',
+        $response = new StreamedResponse(function () use ($prompt) {
+            if (ob_get_level()) {
+                ob_end_clean();
+            }
+
+            $ch = curl_init('http://127.0.0.1:11434/api/generate');
+
+            $payload = json_encode([
+                'model' => 'gemma4:e4b',
                 'system' => OllamaPrompt::system(),
                 'prompt' => $prompt,
                 'stream' => true,
+                'options' => [
+                    'num_ctx' => 4096,
+                    'num_predict' => 2048,
+                    'temperature' => 0.7,
+                ]
             ]);
 
-            $body = $response->getCurlHandle() ?$response->toPsrResponse()->getBody() : null;
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
 
-            while ($body && !$body->eof()) {
-                $line = $body->read(1024);
-                $json = json_decode($line, true);
+            // Буфер для склейки раззорванных JSON-чанков
+            $buffer = '';
 
-                if (isset($json['response'])) {
-                    echo "data: " . json_encode($json['response']) . "\n\n";
-                    ob.flush();
-                    flush();
+            curl_setopt($ch, CURLOPT_WRITEFUNCTION, function ($ch, $data) use (&$buffer) {
+                $buffer .= $data;
+                $lines = explode("\n", $buffer);
+
+                // Оставляем незавершенный хвост строки в буфере
+                $buffer = array_pop($lines);
+
+                foreach ($lines as $line) {
+                    $trimmed = trim($line);
+                    if (empty($trimmed)) continue;
+
+                    $json = json_decode($trimmed, true);
+                    if (isset($json['response'])) {
+                        echo "data: " . json_encode(['text' => $json['response']]) . "\n\n";
+                        @ob_flush();
+                        flush();
+                    }
                 }
-            }
-        }, 200, [
-            'Content-Type' => 'application/json',
-            'Cache-Control' => 'no-cache',
-            'Connection' => 'keep-alive',
-        ]);
+
+                return strlen($data);
+            });
+
+            curl_exec($ch);
+            curl_close($ch);
+        });
+
+        $response->headers->set('Content-Type', 'text/event-stream');
+        $response->headers->set('Cache-Control', 'no-cache');
+        $response->headers->set('Connection', 'keep-alive');
+        $response->headers->set('X-Accel-Buffering', 'no');
+
+        return $response;
     }
 }
