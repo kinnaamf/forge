@@ -47,7 +47,6 @@ class GenerateController extends Controller
                 $buffer .= $data;
                 $lines = explode("\n", $buffer);
 
-                // Оставляем незавершенный хвост строки в буфере
                 $buffer = array_pop($lines);
 
                 foreach ($lines as $line) {
